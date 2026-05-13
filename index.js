@@ -1,21 +1,23 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
+const path = require('path');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.static('.'));
 
-app.post('/', async (req, res) => {
+app.post('/generate-image', async (req, res) => {
   try {
-    const { prompt, payload } = req.body;
+    const { apiKey, prompt } = req.body;
     const response = await fetch('https://api.openai.com/v1/images/generations', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+        'Authorization': `Bearer ${apiKey}`
       },
-      body: JSON.stringify(payload || {
+      body: JSON.stringify({
         model: 'gpt-image-1',
         prompt,
         n: 1,
@@ -30,4 +32,4 @@ app.post('/', async (req, res) => {
   }
 });
 
-app.listen(process.env.PORT || 3000);
+app.listen(process.env.PORT || 3000, () => console.log('AdScale OS running'));
