@@ -1,0 +1,1174 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>AdScale OS — AI Meta Ads System</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #050508; color: #e2e2ea; font-family: 'DM Sans','Segoe UI',sans-serif; }
+    ::-webkit-scrollbar { width: 3px; }
+    ::-webkit-scrollbar-track { background: #07070d; }
+    ::-webkit-scrollbar-thumb { background: #1a1a24; border-radius: 2px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+
+// ─── STORAGE ──────────────────────────────────────────────────────────────────
+const SK_META  = "adscale_meta_v4";   // brands, weights, logs — no images
+const SK_IMGS  = "adscale_imgs_v4";   // gallery entries WITH base64
+
+const loadMeta = async () => { try { const v=localStorage.getItem(SK_META); return v?JSON.parse(v):null; } catch { return null; } };
+const saveMeta = async (d) => { try { localStorage.setItem(SK_META,JSON.stringify(d)); } catch {} };
+const loadImgs = async () => { try { const v=localStorage.getItem(SK_IMGS); return v?JSON.parse(v):[]; } catch { return []; } };
+const saveImgs = async (d) => { try { localStorage.setItem(SK_IMGS,JSON.stringify(d)); } catch {} };
+
+// ─── CONSTANTS ────────────────────────────────────────────────────────────────
+const HOOKS    = ["pain_point","transformation","social_proof","curiosity","urgency","lifestyle","controversy","fomo"];
+const PALETTES = ["high_contrast_dark","clean_white","vibrant_saturated","earthy_natural","luxury_black_gold","pastel_soft","neon_tech","warm_sunset"];
+const STYLES   = ["ugc_raw","lifestyle_photo","product_hero","before_after","testimonial","infographic","cinematic","flat_graphic"];
+const EMOTIONS = ["aspiracional","miedo_perdida","curiosidad","confianza","urgencia","pertenencia","orgullo","alivio"];
+const CTAS     = ["compra_ahora","descubre_mas","oferta_limitada","gratis_hoy","ver_resultado","unete","reclama_descuento","agenda_ahora"];
+const BCOLORS  = ["#00f5d4","#f72585","#4cc9f0","#f8961e","#b5e48c","#c77dff","#ff9f1c","#2ec4b6"];
+
+const LBL = {
+  hooks:    { pain_point:"Dolor", transformation:"Transformación", social_proof:"Prueba Social", curiosity:"Curiosidad", urgency:"Urgencia", lifestyle:"Lifestyle", controversy:"Controversia", fomo:"FOMO" },
+  palettes: { high_contrast_dark:"Alto Contraste", clean_white:"Blanco", vibrant_saturated:"Vibrante", earthy_natural:"Natural", luxury_black_gold:"Lujo", pastel_soft:"Pastel", neon_tech:"Neon Tech", warm_sunset:"Sunset" },
+  styles:   { ugc_raw:"UGC", lifestyle_photo:"Lifestyle", product_hero:"Prod. Hero", before_after:"Antes/Después", testimonial:"Testimonio", infographic:"Infografía", cinematic:"Cinemático", flat_graphic:"Gráfico" },
+  emotions: { aspiracional:"Aspiracional", miedo_perdida:"Miedo/Pérdida", curiosidad:"Curiosidad", confianza:"Confianza", urgencia:"Urgencia", pertenencia:"Pertenencia", orgullo:"Orgullo", alivio:"Alivio" },
+  ctas:     { compra_ahora:"Compra Ahora", descubre_mas:"Descubre Más", oferta_limitada:"Oferta Limitada", gratis_hoy:"Gratis Hoy", ver_resultado:"Ver Resultado", unete:"Únete", reclama_descuento:"Reclama Descuento", agenda_ahora:"Agenda Ahora" }
+};
+
+// ─── DATA ─────────────────────────────────────────────────────────────────────
+const defaultWeights = () => ({
+  hooks:    Object.fromEntries(HOOKS.map(k=>[k,50])),
+  palettes: Object.fromEntries(PALETTES.map(k=>[k,50])),
+  styles:   Object.fromEntries(STYLES.map(k=>[k,50])),
+  emotions: Object.fromEntries(EMOTIONS.map(k=>[k,50])),
+  ctas:     Object.fromEntries(CTAS.map(k=>[k,50])),
+  totalAds:0, totalRounds:0, bestCpa:null, avgCpa:null, cpaHistory:[], winnerHistory:[]
+});
+
+const makeBrand = (name, color) => ({
+  id: `b_${Date.now()}_${Math.random().toString(36).slice(2,6)}`,
+  name, color: color||BCOLORS[0],
+  weights: defaultWeights(), variants:[], adLog:[], brief:null
+});
+
+const defaultMeta = () => {
+  const brands = [makeBrand("Marca 1",BCOLORS[0]), makeBrand("Marca 2",BCOLORS[1]), makeBrand("Marca 3",BCOLORS[2])];
+  return { brands, activeBrandId: brands[0].id, apiKey:"" };
+};
+
+// ─── SCORING + LEARNING ───────────────────────────────────────────────────────
+const scoreV = (v,w) => Math.min(100, Math.round(
+  [["hooks",v.hook],["palettes",v.palette],["styles",v.style],["emotions",v.emotion],["ctas",v.cta]]
+  .reduce((s,[d,k])=>s+(w[d]?.[k]||50),0)/5
+));
+
+const learnW = (weights, variant, cpa, avg) => {
+  const delta = avg>0 ? ((avg-cpa)/avg)*25 : 0;
+  const w = JSON.parse(JSON.stringify(weights));
+  [["hooks",variant.hook],["palettes",variant.palette],["styles",variant.style],["emotions",variant.emotion],["ctas",variant.cta]]
+    .forEach(([d,k])=>{ if(w[d]?.[k]!==undefined) w[d][k]=Math.max(5,Math.min(100,w[d][k]+delta)); });
+  return w;
+};
+
+const makeAdName = (brand, variant, idx) => {
+  const bn = brand.name.replace(/\s+/g,"").toUpperCase().slice(0,4);
+  const rn = String((brand.weights.totalRounds||0)+1).padStart(2,"0");
+  const vn = String(idx+1).padStart(2,"0");
+  const h  = variant.hook.split("_").map(x=>x[0].toUpperCase()).join("");
+  const s  = variant.style.split("_").map(x=>x[0].toUpperCase()).join("");
+  return `${bn}-R${rn}-${vn}-${h}-${s}`;
+};
+
+// ─── PROMPT ───────────────────────────────────────────────────────────────────
+const buildPrompt = (brief, v, imgNote) => {
+  const hookD  = { pain_point:"visually showing the deep daily frustration/problem the audience experiences", transformation:"dramatic before-and-after transformation moment showing clear results", social_proof:"crowd of happy satisfied users, 5-star reviews, testimonial proof elements", curiosity:"intriguing mysterious visual that raises questions and demands a second look", urgency:"scarcity elements, countdown energy, limited availability visual cues", lifestyle:"aspirational life scenario with the product naturally and seamlessly integrated", controversy:"bold provocative statement that challenges the status quo and stops the scroll", fomo:"exclusive community or trend that viewers feel they are urgently missing out on" };
+  const palD   = { high_contrast_dark:"dark moody background with bright neon accent highlights for maximum contrast", clean_white:"pure white studio minimalist aesthetic with sharp isolated product focus", vibrant_saturated:"maximally saturated bold colors, high energy, eye-catching palette", earthy_natural:"warm terracotta, sage green, natural wood textures, organic feel", luxury_black_gold:"premium matte black background with gold leaf accents, high-end feel", pastel_soft:"soft blush, lavender, mint pastel palette, approachable and gentle", neon_tech:"cyberpunk neon glow on dark grid background, futuristic tech feel", warm_sunset:"golden amber orange gradient, warm inviting emotional tones" };
+  const styleD = { ugc_raw:"authentic raw user-generated content, slightly imperfect, real person casual setting, phone-shot aesthetic that feels genuine", lifestyle_photo:"professional editorial lifestyle photography, natural golden hour light, magazine quality", product_hero:"clean commercial product photography, studio lighting, isolated subject on seamless background", before_after:"bold split-screen composition showing dramatic transformation side by side", testimonial:"social media screenshot composition with star ratings and review text overlay", infographic:"bold data-driven graphic design with icons, statistics, and clear visual hierarchy", cinematic:"wide-angle cinematic composition, dramatic depth of field, subtle film grain, story-telling energy", flat_graphic:"bold flat design illustration with geometric shapes, strong typography, clean modern look" };
+  return `Create a professional Facebook/Instagram high-converting ad image optimized for the lowest possible CPA.
+
+PRODUCT: ${brief.productName||"Product"}
+TARGET AUDIENCE: ${brief.targetAudience||"general audience"}
+KEY BENEFIT: ${brief.mainBenefit||"great results"}
+PAIN SOLVED: ${brief.mainPain||"common problem"}
+VISUAL STYLE: ${styleD[v.style]||v.style}
+COLOR PALETTE: ${palD[v.palette]||v.palette}
+VISUAL HOOK APPROACH: ${hookD[v.hook]||v.hook}
+HEADLINE TEXT OVERLAY: "${v.headline}" — must be bold, large font, readable within 2 seconds on mobile
+BODY COPY OVERLAY: "${v.bodyText}" — smaller supporting text below headline
+CTA BUTTON: "${LBL.ctas[v.cta]||v.cta}" — high contrast button prominently placed at bottom
+${brief.socialProof ? `SOCIAL PROOF ELEMENT: ${brief.socialProof}` : ""}
+${imgNote ? `PRODUCT IMAGE REFERENCE: ${imgNote}` : ""}
+
+FORMAT REQUIREMENTS: 1080x1080px square format, mobile-first composition, thumb-stopping visual hierarchy, all text within safe zones, photorealistic quality. This creative must be optimized to generate maximum purchases at the lowest cost per acquisition possible.`;
+};
+
+// ─── DOWNLOAD HELPERS ─────────────────────────────────────────────────────────
+const downloadPNG = (dataUrl, filename) => {
+  const a = document.createElement("a");
+  a.href = dataUrl; a.download = filename+".png";
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+};
+
+const downloadZIP = async (entries) => {
+  // Pure JS ZIP — no external lib needed for simple file bundles
+  // We'll use a blob download of each file sequentially with a small delay
+  // For a true ZIP we build a minimal ZIP structure manually
+  const files = entries.filter(e=>e.imageUrl);
+  if(!files.length) return;
+  
+  // Build minimal ZIP binary
+  const enc = new TextEncoder();
+  const parts = []; const centralDir = []; let offset = 0;
+
+  for(const entry of files){
+    const name = enc.encode(entry.adName+".png");
+    const data = Uint8Array.from(atob(entry.imageUrl.split(",")[1]), c=>c.charCodeAt(0));
+    
+    // Local file header
+    const lh = new Uint8Array(30+name.length);
+    const lhv = new DataView(lh.buffer);
+    lhv.setUint32(0,0x04034b50,true);  // signature
+    lhv.setUint16(4,20,true);           // version
+    lhv.setUint16(6,0,true);            // flags
+    lhv.setUint16(8,0,true);            // no compression
+    lhv.setUint16(10,0,true); lhv.setUint16(12,0,true); // time/date
+    // CRC32
+    let crc=0xFFFFFFFF;
+    for(let i=0;i<data.length;i++){crc^=data[i];for(let j=0;j<8;j++)crc=(crc>>>1)^(crc&1?0xEDB88320:0);}
+    crc=(crc^0xFFFFFFFF)>>>0;
+    lhv.setUint32(14,crc,true);
+    lhv.setUint32(18,data.length,true); lhv.setUint32(22,data.length,true);
+    lhv.setUint16(26,name.length,true); lhv.setUint16(28,0,true);
+    lh.set(name,30);
+
+    // Central dir entry
+    const cd = new Uint8Array(46+name.length);
+    const cdv = new DataView(cd.buffer);
+    cdv.setUint32(0,0x02014b50,true);
+    cdv.setUint16(4,20,true); cdv.setUint16(6,20,true);
+    cdv.setUint16(8,0,true); cdv.setUint16(10,0,true);
+    cdv.setUint16(12,0,true); cdv.setUint16(14,0,true);
+    cdv.setUint32(16,crc,true);
+    cdv.setUint32(20,data.length,true); cdv.setUint32(24,data.length,true);
+    cdv.setUint16(28,name.length,true);
+    cdv.setUint16(30,0,true); cdv.setUint16(32,0,true);
+    cdv.setUint16(34,0,true); cdv.setUint32(38,0,true);
+    cdv.setUint32(42,offset,true);
+    cd.set(name,46);
+
+    parts.push(lh,data); centralDir.push(cd);
+    offset+=lh.length+data.length;
+  }
+
+  const cdSize = centralDir.reduce((s,c)=>s+c.length,0);
+  const eocd = new Uint8Array(22);
+  const eocdv = new DataView(eocd.buffer);
+  eocdv.setUint32(0,0x06054b50,true);
+  eocdv.setUint16(4,0,true); eocdv.setUint16(6,0,true);
+  eocdv.setUint16(8,files.length,true); eocdv.setUint16(10,files.length,true);
+  eocdv.setUint32(12,cdSize,true); eocdv.setUint32(16,offset,true);
+  eocdv.setUint16(20,0,true);
+
+  const blob = new Blob([...parts,...centralDir,eocd],{type:"application/zip"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href=url; a.download=`AdScaleOS_${entries[0]?.brandName||"brand"}_R${entries[0]?.round||"1"}.zip`;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
+};
+
+// ─── API ──────────────────────────────────────────────────────────────────────
+const callClaude = async (messages) => {
+  const r = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:2000,messages})});
+  const d = await r.json(); return d.content?.map(c=>c.text||"").join("")||"";
+};
+
+const callGPTImage = async (key, prompt) => {
+  const r = await fetch("https://api.openai.com/v1/images/generations",{method:"POST",
+    headers:{"Content-Type":"application/json","Authorization":`Bearer ${key}`},
+    body:JSON.stringify({model:"gpt-image-1",prompt,n:1,size:"1024x1024",quality:"high"})});
+  const d = await r.json();
+  if(d.error) throw new Error(d.error.message);
+  return d.data?.[0]?.b64_json ? `data:image/png;base64,${d.data[0].b64_json}` : d.data?.[0]?.url;
+};
+
+const analyzeShot = async (b64) => {
+  const r = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1500,messages:[{role:"user",content:[
+      {type:"image",source:{type:"base64",media_type:"image/png",data:b64}},
+      {type:"text",text:`Analyze this Meta Ads Manager screenshot. Extract ALL visible ad rows with their metrics. Return ONLY a valid JSON array, no markdown, no explanation:
+[{"adName":"exact ad name as shown","impressions":number_or_null,"ctr":number_or_null,"cpa":number_or_null,"spend":number_or_null,"purchases":number_or_null,"roas":number_or_null}]`}
+    ]}]})});
+  const d = await r.json();
+  try { return JSON.parse((d.content?.[0]?.text||"[]").replace(/```json|```/g,"").trim()); }
+  catch { return []; }
+};
+
+// ─── DESIGN ───────────────────────────────────────────────────────────────────
+const T = {
+  bg:"#050508", card:"rgba(255,255,255,0.028)",
+  border:"rgba(255,255,255,0.07)", faint:"#16161f",
+  text:"#e2e2ea", muted:"#555",
+  mono:"'IBM Plex Mono',monospace", sans:"'DM Sans','Segoe UI',sans-serif"
+};
+
+const Spin = ({size=18,color="#00f5d4"}) =>
+  <div style={{width:size,height:size,borderRadius:"50%",border:`2px solid ${color}22`,borderTopColor:color,animation:"spin .65s linear infinite",flexShrink:0}}/>;
+
+const Tag = ({children,color="#00f5d4",xs,onClick}) => (
+  <span onClick={onClick} style={{padding:xs?"2px 7px":"3px 10px",borderRadius:20,fontSize:xs?9:11,fontWeight:700,letterSpacing:"0.4px",background:`${color}15`,color,border:`1px solid ${color}28`,whiteSpace:"nowrap",cursor:onClick?"pointer":"default"}}>{children}</span>
+);
+
+const Bar = ({v,color,h=4}) => {
+  const c=color||(v>=75?"#00f5d4":v>=55?"#f8961e":"#f72585");
+  return <div style={{background:"rgba(255,255,255,0.05)",borderRadius:3,height:h,overflow:"hidden"}}><div style={{width:`${v}%`,height:"100%",background:`linear-gradient(90deg,${c}55,${c})`,borderRadius:3,transition:"width .9s ease"}}/></div>;
+};
+
+const Card = ({children,glow,style={},onClick}) => (
+  <div onClick={onClick} style={{background:T.card,border:`1px solid ${glow?glow+"22":T.border}`,borderRadius:14,padding:18,position:"relative",overflow:"hidden",boxShadow:glow?`0 0 24px ${glow}15`:undefined,transition:"all .18s",cursor:onClick?"pointer":"default",...style}}>{children}</div>
+);
+
+const Kpi = ({label,val,sub,color="#00f5d4",icon}) => (
+  <Card glow={color} style={{padding:"14px 18px"}}>
+    <div style={{fontSize:9,color:T.muted,fontFamily:T.mono,letterSpacing:"1.2px",marginBottom:5}}>{icon} {label}</div>
+    <div style={{fontSize:20,fontWeight:900,color,letterSpacing:"-1px",fontFamily:T.mono}}>{val}</div>
+    {sub&&<div style={{fontSize:9,color:"#2a2a35",marginTop:3}}>{sub}</div>}
+  </Card>
+);
+
+const Spark = ({data,color="#00f5d4",w=130,h=36}) => {
+  if(!data||data.length<2) return <div style={{width:w,height:h,display:"flex",alignItems:"center",justifyContent:"center",color:"#1e1e28",fontSize:10,fontFamily:T.mono}}>sin datos</div>;
+  const mn=Math.min(...data),mx=Math.max(...data),rng=mx-mn||1;
+  const pts=data.map((v,i)=>`${(i/(data.length-1))*w},${h-((v-mn)/rng)*(h-4)-2}`).join(" ");
+  return <svg width={w} height={h}><polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/><polyline points={`0,${h} ${pts} ${w},${h}`} fill={`${color}10`} stroke="none"/></svg>;
+};
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+export default function AdScaleOS() {
+  const [meta,  setMeta]  = useState(null);
+  const [imgs,  setImgs]  = useState([]);   // gallery entries
+  const [view,  setView]  = useState("dashboard");
+  const [ready, setReady] = useState(false);
+
+  // UI state
+  const [genBusy,  setGenBusy]  = useState(false);
+  const [genMsg,   setGenMsg]   = useState("");
+  const [imgBusy,  setImgBusy]  = useState({});
+  const [selVar,   setSelVar]   = useState(null);
+  const [shotSrc,  setShotSrc]  = useState(null);
+  const [shotBusy, setShotBusy] = useState(false);
+  const [shotMets, setShotMets] = useState([]);
+  const [prodPics, setProdPics] = useState([]);
+  const [apiDraft, setApiDraft] = useState("");
+  const [showKey,  setShowKey]  = useState(false);
+  const [newBrand, setNewBrand] = useState("");
+  const [briefForm,setBriefForm]= useState({productName:"",productUrl:"",category:"ecommerce"});
+  // Gallery filters
+  const [galBrand, setGalBrand] = useState("all");
+  const [galRound, setGalRound] = useState("all");
+  const [galFilter,setGalFilter]= useState("all"); // all | winner | tested | generated
+  const [lightbox, setLightbox] = useState(null);  // gallery entry for full view
+  const [imgError, setImgError] = useState({});
+
+  const shotRef=useRef(), imgRef=useRef();
+
+  // Load
+  useEffect(()=>{
+    Promise.all([loadMeta(), loadImgs()]).then(([m,i])=>{
+      const a=m||defaultMeta();
+      if(!a.activeBrandId) a.activeBrandId=a.brands[0]?.id;
+      setMeta(a); setImgs(i||[]); setReady(true);
+    });
+  },[]);
+
+  // Save meta (no images)
+  useEffect(()=>{ if(meta) saveMeta(meta); },[meta]);
+  // Save images separately
+  useEffect(()=>{ saveImgs(imgs); },[imgs]);
+
+  const brand = meta?.brands?.find(b=>b.id===meta?.activeBrandId);
+  const w     = brand?.weights||defaultWeights();
+
+  const mutMeta  = useCallback((fn)=>setMeta(p=>{const a=JSON.parse(JSON.stringify(p));fn(a);return a;}),[]);
+  const mutBrand = useCallback((fn)=>mutMeta(a=>{const b=a.brands.find(x=>x.id===a.activeBrandId);if(b)fn(b);}),[mutMeta]);
+
+  // ── BRIEF + VARIANTS ──
+  const doBrief = useCallback(async()=>{
+    if(!briefForm.productName.trim()) return;
+    setGenBusy(true); setGenMsg("🧠 Analizando producto...");
+    try {
+      const raw = await callClaude([{role:"user",content:`You are a world-class direct response strategist specialized in Meta Ads that scale to $100k/day. Analyze this product and return a complete ad brief as JSON only, no markdown.
+
+Product: ${briefForm.productName}
+URL: ${briefForm.productUrl||"N/A"}
+Category: ${briefForm.category}
+
+Return this exact JSON structure:
+{
+  "productName":"...",
+  "targetAudience":"detailed avatar with demographics and psychographics",
+  "mainBenefit":"primary transformation in one powerful sentence",
+  "mainPain":"deepest pain keeping them awake at night",
+  "socialProof":"most compelling proof element to feature",
+  "uniqueAngle":"what makes this different from every competitor",
+  "hooks":{"pain_point":["h1","h2"],"transformation":["h1","h2"],"social_proof":["h1","h2"],"curiosity":["h1","h2"],"urgency":["h1","h2"],"lifestyle":["h1","h2"],"controversy":["h1","h2"],"fomo":["h1","h2"]},
+  "fullAdCopies":[
+    {"headline":"...","body":"2-line supporting copy","cta":"..."},
+    {"headline":"...","body":"2-line supporting copy","cta":"..."},
+    {"headline":"...","body":"2-line supporting copy","cta":"..."},
+    {"headline":"...","body":"2-line supporting copy","cta":"..."}
+  ]
+}`}]);
+      const brief = JSON.parse(raw.replace(/```json|```/g,"").trim());
+      brief.productUrl = briefForm.productUrl;
+      setGenMsg("✓ Brief listo — generando variantes...");
+      const bw = brand?.weights||defaultWeights();
+      const sH=[...HOOKS].sort((a,b)=>(bw.hooks[b]||50)-(bw.hooks[a]||50));
+      const sS=[...STYLES].sort((a,b)=>(bw.styles[b]||50)-(bw.styles[a]||50));
+      const sP=[...PALETTES].sort((a,b)=>(bw.palettes[b]||50)-(bw.palettes[a]||50));
+      const cfgs=[
+        {hook:sH[0],style:sS[0],palette:sP[0],emotion:"aspiracional",cta:"compra_ahora"},
+        {hook:sH[1]||sH[0],style:sS[1]||sS[0],palette:sP[1]||sP[0],emotion:"miedo_perdida",cta:"oferta_limitada"},
+        {hook:sH[2]||sH[0],style:sS[2]||sS[0],palette:sP[2]||sP[0],emotion:"confianza",cta:"ver_resultado"},
+        {hook:sH[3]||sH[1],style:sS[3]||sS[1],palette:sP[0],emotion:"urgencia",cta:"reclama_descuento"},
+      ];
+      const tmp={name:brand?.name||"BRAND",weights:bw};
+      const variants=cfgs.map((cfg,i)=>{
+        const copy=brief.fullAdCopies?.[i]||{};
+        return { id:`v_${Date.now()}_${i}`, ...cfg,
+          headline:copy.headline||brief.mainBenefit||"",
+          bodyText:copy.body||"",
+          predictedScore:scoreV(cfg,bw),
+          adName:makeAdName(tmp,cfg,i),
+          imageUrl:null, status:"ready", metrics:null
+        };
+      }).sort((a,b)=>b.predictedScore-a.predictedScore);
+      mutBrand(b=>{b.brief=brief;b.variants=variants;});
+      setView("variants"); setGenMsg("✓ Listo");
+    } catch(e){ setGenMsg("Error: "+e.message); }
+    setGenBusy(false);
+  },[briefForm,brand,mutBrand]);
+
+  // ── GENERATE IMAGE via Cloudflare Proxy ──
+  const PROXY_URL = "https://adscreator.forti370.workers.dev";
+
+  const doImage = useCallback(async(variant)=>{
+    if(!meta?.apiKey){ alert("Configura tu API key de OpenAI en Ajustes."); return; }
+    setImgBusy(p=>({...p,[variant.id]:true}));
+    setImgError(p=>({...p,[variant.id]:null}));
+    try {
+      const imgNote = prodPics.length>0 ? `${prodPics.length} product reference images provided` : "";
+      const prompt = buildPrompt(brand?.brief||{}, variant, imgNote);
+
+      const resp = await fetch("/generate-image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: meta.apiKey, prompt })
+      });
+
+      const data = await resp.json();
+      if(data.error) throw new Error(data.error.message);
+
+      const url = data.data?.[0]?.b64_json
+        ? `data:image/png;base64,${data.data[0].b64_json}`
+        : data.data?.[0]?.url;
+
+      if(!url) throw new Error("OpenAI no devolvió imagen. Verifica tu acceso a gpt-image-1.");
+
+      const imgEntry = {
+        id: `img_${Date.now()}_${variant.id}`,
+        brandId: brand.id, brandName: brand.name, brandColor: brand.color,
+        variantId: variant.id, adName: variant.adName,
+        round: (brand.weights.totalRounds||0)+1,
+        hook: variant.hook, style: variant.style,
+        palette: variant.palette, emotion: variant.emotion,
+        headline: variant.headline, bodyText: variant.bodyText,
+        predictedScore: variant.predictedScore,
+        imageUrl: url, format: "PNG 1024×1024",
+        status: "generated", metrics: null, createdAt: Date.now()
+      };
+      setImgs(p=>[imgEntry,...p]);
+      mutBrand(b=>{ const v=b.variants.find(x=>x.id===variant.id); if(v){v.imageUrl=url;v.imgEntryId=imgEntry.id;v.status="generated";} });
+    } catch(e){
+      console.error("doImage error:", e);
+      setImgError(p=>({...p,[variant.id]:e.message}));
+    }
+    setImgBusy(p=>({...p,[variant.id]:false}));
+  },[meta,brand,prodPics,mutBrand]);
+
+  // ── SCREENSHOT ANALYSIS ──
+  const doShot = useCallback(async(file)=>{
+    setShotBusy(true);
+    const reader=new FileReader();
+    reader.onload=async e=>{
+      setShotSrc(e.target.result);
+      const b64=e.target.result.split(",")[1];
+      try {
+        const raw=await analyzeShot(b64);
+        const matched=raw.map(m=>{
+          const v=brand?.variants?.find(x=>x.adName&&m.adName&&m.adName.replace(/\s/g,"").includes(x.adName.split("-").slice(0,3).join("-")));
+          return {...m,variantId:v?.id,matched:!!v,variantAdName:v?.adName,imgEntryId:v?.imgEntryId};
+        });
+        setShotMets(matched);
+      } catch(e){ alert("Error: "+e.message); }
+      setShotBusy(false);
+    };
+    reader.readAsDataURL(file);
+  },[brand]);
+
+  // ── APPLY LEARNING ──
+  const applyLearning = useCallback(()=>{
+    const valid=shotMets.filter(m=>m.matched&&m.cpa!=null);
+    if(!valid.length) return;
+    const avg=valid.reduce((s,m)=>s+parseFloat(m.cpa),0)/valid.length;
+    const cpas=valid.map(m=>parseFloat(m.cpa));
+    const bestCpa=w.bestCpa!=null?Math.min(w.bestCpa,...cpas):Math.min(...cpas);
+    const winner=valid.reduce((a,c)=>parseFloat(c.cpa)<parseFloat(a.cpa)?c:a,valid[0]);
+    const wv=brand?.variants?.find(x=>x.id===winner.variantId);
+
+    mutBrand(b=>{
+      let bw={...b.weights};
+      valid.forEach(m=>{ const v=b.variants.find(x=>x.id===m.variantId); if(v) bw=learnW(bw,v,parseFloat(m.cpa),avg); });
+      bw.totalAds=(bw.totalAds||0)+valid.length;
+      bw.totalRounds=(bw.totalRounds||0)+1;
+      bw.bestCpa=bestCpa; bw.avgCpa=avg;
+      bw.cpaHistory=[...(bw.cpaHistory||[]).slice(-19),{r:bw.totalRounds,avg,best:bestCpa}];
+      bw.winnerHistory=[...(bw.winnerHistory||[]).slice(-9),{r:bw.totalRounds,adName:wv?.adName,hook:wv?.hook,style:wv?.style,cpa:winner.cpa}];
+      b.weights=bw;
+      b.adLog=[...valid.map(m=>{const v=b.variants.find(x=>x.id===m.variantId);return{...m,hook:v?.hook,style:v?.style,headline:v?.headline,ts:Date.now()};}), ...(b.adLog||[])].slice(0,60);
+    });
+
+    // Update gallery entries with metrics + status
+    setImgs(p=>p.map(img=>{
+      const m=valid.find(x=>x.imgEntryId===img.id);
+      if(!m) return img;
+      const isWinner=m.variantId===winner.variantId;
+      return {...img, metrics:{cpa:parseFloat(m.cpa),ctr:m.ctr,roas:m.roas,purchases:m.purchases,spend:m.spend,impressions:m.impressions}, status:isWinner?"winner":"tested"};
+    }));
+
+    setShotMets([]); setShotSrc(null); setView("gallery");
+  },[shotMets,w,brand,mutBrand]);
+
+  const handleProdPics=(files)=>{
+    const arr=Array.from(files).slice(0,4); const ps=[];
+    arr.forEach(f=>{const r=new FileReader();r.onload=e=>{ps.push(e.target.result);if(ps.length===arr.length)setProdPics([...ps]);};r.readAsDataURL(f);});
+  };
+
+  const addBrandFn=()=>{
+    if(!newBrand.trim()) return;
+    const c=BCOLORS[meta.brands.length%BCOLORS.length];
+    const nb=makeBrand(newBrand.trim(),c);
+    mutMeta(a=>{a.brands.push(nb);a.activeBrandId=nb.id;});
+    setNewBrand(""); setView("dashboard");
+  };
+
+  if(!ready) return (
+    <div style={{minHeight:"100vh",background:T.bg,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:14}}>
+      <Spin size={36}/><div style={{color:"#333",fontFamily:T.mono,fontSize:11,letterSpacing:"2px"}}>ADSCALE OS LOADING...</div>
+    </div>
+  );
+
+  const topOf=(dim)=>Object.entries(w[dim]||{}).sort((a,b)=>b[1]-a[1]).slice(0,4);
+  const brandImgs = imgs.filter(i=>i.brandId===brand?.id);
+  const rounds = [...new Set(brandImgs.map(i=>i.round))].sort((a,b)=>b-a);
+
+  // Gallery filtered list
+  const filteredImgs = imgs.filter(i=>{
+    if(galBrand!=="all" && i.brandId!==galBrand) return false;
+    if(galRound!=="all" && String(i.round)!==String(galRound)) return false;
+    if(galFilter!=="all" && i.status!==galFilter) return false;
+    return true;
+  });
+
+  const allRounds=[...new Set(imgs.map(i=>i.round))].sort((a,b)=>b-a);
+
+  return (
+    <div style={{minHeight:"100vh",background:T.bg,color:T.text,fontFamily:T.sans,display:"flex"}}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,600;9..40,700;9..40,800;9..40,900&family=IBM+Plex+Mono:wght@400;600;700&display=swap');
+        @keyframes spin{to{transform:rotate(360deg)}}
+        @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+        @keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+        ::-webkit-scrollbar{width:3px}::-webkit-scrollbar-track{background:#07070d}::-webkit-scrollbar-thumb{background:#1a1a24;border-radius:2px}
+        input::placeholder{color:#252530!important}
+        *{box-sizing:border-box}
+      `}</style>
+
+      {/* ═══════════════ SIDEBAR ═══════════════ */}
+      <aside style={{width:208,background:"#07070d",borderRight:`1px solid ${T.border}`,display:"flex",flexDirection:"column",flexShrink:0,position:"sticky",top:0,height:"100vh",overflowY:"auto"}}>
+        <div style={{padding:"18px 14px 14px",borderBottom:`1px solid ${T.border}`}}>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <div style={{width:28,height:28,borderRadius:7,background:"linear-gradient(135deg,#00f5d4,#4cc9f0)",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900,fontSize:13,color:"#000",flexShrink:0}}>A</div>
+            <div>
+              <div style={{fontWeight:900,fontSize:13,color:"#fff",letterSpacing:"-0.3px",lineHeight:1}}>AdScale OS</div>
+              <div style={{fontSize:7,color:"#252530",letterSpacing:"2px",fontFamily:T.mono,marginTop:2}}>AI CREATIVE SYSTEM</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Brand switcher */}
+        <div style={{padding:"10px 8px 4px",borderBottom:`1px solid ${T.border}`}}>
+          <div style={{fontSize:7,color:"#252530",letterSpacing:"2px",fontFamily:T.mono,padding:"0 6px",marginBottom:5}}>MARCAS</div>
+          {meta?.brands?.map(b=>{
+            const act=b.id===meta.activeBrandId;
+            const bImgCount=imgs.filter(i=>i.brandId===b.id).length;
+            return (
+              <div key={b.id} onClick={()=>{mutMeta(a=>a.activeBrandId=b.id);setView("dashboard");}} style={{display:"flex",alignItems:"center",gap:7,padding:"6px 7px",borderRadius:7,cursor:"pointer",marginBottom:1,background:act?"rgba(255,255,255,0.05)":"transparent",border:`1px solid ${act?b.color+"22":"transparent"}`}}>
+                <div style={{width:6,height:6,borderRadius:"50%",background:b.color,flexShrink:0,boxShadow:act?`0 0 6px ${b.color}`:undefined}}/>
+                <span style={{fontSize:11,color:act?"#e8e8f0":"#555",fontWeight:act?700:400,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{b.name}</span>
+                {bImgCount>0&&<span style={{fontSize:7,color:b.color,fontFamily:T.mono}}>{bImgCount}img</span>}
+              </div>
+            );
+          })}
+          <div style={{display:"flex",alignItems:"center",gap:5,padding:"4px 7px",marginTop:2}}>
+            <input value={newBrand} onChange={e=>setNewBrand(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addBrandFn()} placeholder="+ Nueva marca" style={{flex:1,background:"transparent",border:"none",outline:"none",fontSize:10,color:"#333"}}/>
+            {newBrand&&<div onClick={addBrandFn} style={{color:"#00f5d4",cursor:"pointer",fontSize:15,lineHeight:1}}>+</div>}
+          </div>
+        </div>
+
+        {/* Nav */}
+        <nav style={{padding:"6px 8px",flex:1}}>
+          {[
+            {id:"dashboard", ico:"◈", lbl:"Dashboard"},
+            {id:"brief",     ico:"⬡", lbl:"Nuevo Brief"},
+            {id:"variants",  ico:"◫", lbl:"Variantes",   off:!brand?.variants?.length},
+            {id:"gallery",   ico:"▣", lbl:"Galería",     badge:imgs.length||null},
+            {id:"results",   ico:"◉", lbl:"Resultados"},
+            {id:"settings",  ico:"◎", lbl:"Ajustes"},
+          ].map(x=>(
+            <div key={x.id} onClick={()=>!x.off&&setView(x.id)} style={{display:"flex",alignItems:"center",gap:7,padding:"7px 7px",borderRadius:7,cursor:x.off?"default":"pointer",opacity:x.off?.3:1,marginBottom:1,background:view===x.id?"rgba(255,255,255,0.05)":"transparent"}}>
+              <span style={{fontSize:12,color:view===x.id?(brand?.color||"#00f5d4"):"#252530",fontFamily:"monospace"}}>{x.ico}</span>
+              <span style={{fontSize:11,color:view===x.id?"#dde0f0":"#555",fontWeight:view===x.id?700:400,flex:1}}>{x.lbl}</span>
+              {x.badge&&<span style={{fontSize:7,background:brand?.color||"#00f5d4",color:"#000",borderRadius:10,padding:"1px 5px",fontWeight:700,fontFamily:T.mono}}>{x.badge}</span>}
+            </div>
+          ))}
+        </nav>
+
+        <div style={{padding:"9px 14px",borderTop:`1px solid ${T.border}`}}>
+          <div onClick={()=>setView("settings")} style={{cursor:"pointer",display:"flex",alignItems:"center",gap:6}}>
+            <div style={{width:5,height:5,borderRadius:"50%",background:meta?.apiKey?"#00f5d4":"#f72585",animation:"pulse 2s infinite"}}/>
+            <span style={{fontSize:8,color:meta?.apiKey?"#00f5d433":"#f7258533",fontFamily:T.mono,letterSpacing:"1px"}}>{meta?.apiKey?"OPENAI ✓":"SIN API KEY"}</span>
+          </div>
+        </div>
+      </aside>
+
+      {/* ═══════════════ MAIN ═══════════════ */}
+      <main style={{flex:1,padding:"26px 28px",overflowY:"auto",minHeight:"100vh"}}>
+
+        {/* ── DASHBOARD ── */}
+        {view==="dashboard"&&(
+          <div style={{animation:"fadeUp .3s ease"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:22}}>
+              <div>
+                <div style={{fontSize:8,color:brand?.color||"#00f5d4",fontFamily:T.mono,letterSpacing:"2.5px",marginBottom:2}}>BRAND INTELLIGENCE</div>
+                <h1 style={{margin:0,fontSize:20,fontWeight:900,letterSpacing:"-0.7px"}}>{brand?.name} <span style={{color:brand?.color||"#00f5d4"}}>↗</span></h1>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={()=>setView("gallery")} style={{padding:"8px 16px",background:"rgba(255,255,255,0.04)",border:`1px solid ${T.border}`,borderRadius:9,color:"#888",fontSize:11,cursor:"pointer"}}>▣ Galería ({brandImgs.length})</button>
+                <button onClick={()=>setView("brief")} style={{padding:"8px 18px",background:`linear-gradient(135deg,${brand?.color||"#00f5d4"},#4cc9f0)`,border:"none",borderRadius:9,color:"#000",fontWeight:800,fontSize:11,cursor:"pointer"}}>+ Brief</button>
+              </div>
+            </div>
+
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:14}}>
+              <Kpi icon="◈" label="BEST CPA"   val={w.bestCpa?`$${w.bestCpa.toFixed(2)}`:"—"} color={brand?.color||"#00f5d4"} sub="costo mínimo logrado"/>
+              <Kpi icon="◈" label="AVG CPA"    val={w.avgCpa?`$${w.avgCpa.toFixed(2)}`:"—"}  color="#4cc9f0" sub="promedio de campaña"/>
+              <Kpi icon="▣" label="IMÁGENES"   val={brandImgs.length} color="#c77dff" sub={`${brandImgs.filter(i=>i.status==="winner").length} ganadoras`}/>
+              <Kpi icon="◈" label="RONDAS"     val={w.totalRounds||0} color="#f8961e" sub={`${w.totalAds||0} ads analizados`}/>
+            </div>
+
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+              <Card glow={brand?.color}>
+                <div style={{fontSize:8,color:T.muted,fontFamily:T.mono,letterSpacing:"1.5px",marginBottom:12}}>◈ EVOLUCIÓN CPA</div>
+                {w.cpaHistory?.length>1?(
+                  <div>
+                    <Spark data={w.cpaHistory.map(c=>c.avg)} color={brand?.color||"#00f5d4"} w={260} h={48}/>
+                    <div style={{display:"flex",justifyContent:"space-between",marginTop:6}}>
+                      <span style={{fontSize:8,color:"#222",fontFamily:T.mono}}>R1</span>
+                      <span style={{fontSize:8,color:"#222",fontFamily:T.mono}}>R{w.totalRounds}</span>
+                    </div>
+                    {(()=>{const f=w.cpaHistory[0]?.avg,l=w.cpaHistory[w.cpaHistory.length-1]?.avg,p=f>0?((f-l)/f*100):0;
+                    return p>0&&<div style={{fontSize:10,color:"#00f5d4",marginTop:4}}>↓ CPA bajó {p.toFixed(1)}% desde ronda 1</div>;})()}
+                  </div>
+                ):<div style={{height:48,display:"flex",alignItems:"center",justifyContent:"center",color:"#1a1a24",fontSize:9,fontFamily:T.mono}}>Disponible tras la primera ronda</div>}
+              </Card>
+
+              <Card>
+                <div style={{fontSize:8,color:T.muted,fontFamily:T.mono,letterSpacing:"1.5px",marginBottom:12}}>◉ GANADORES</div>
+                {w.winnerHistory?.length>0?w.winnerHistory.slice().reverse().slice(0,4).map((wh,i)=>(
+                  <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 0",borderBottom:`1px solid ${T.faint}`}}>
+                    <div>
+                      <div style={{fontSize:9,color:"#777",fontFamily:T.mono}}>{wh.adName}</div>
+                      <div style={{display:"flex",gap:4,marginTop:2}}><Tag color="#c77dff" xs>{LBL.hooks[wh.hook]||wh.hook}</Tag><Tag color="#4cc9f0" xs>{LBL.styles[wh.style]||wh.style}</Tag></div>
+                    </div>
+                    <div style={{fontSize:13,fontWeight:900,color:"#00f5d4",fontFamily:T.mono}}>${parseFloat(wh.cpa).toFixed(2)}</div>
+                  </div>
+                )):<div style={{color:"#1a1a24",fontSize:9,fontFamily:T.mono}}>Sin ganadores aún</div>}
+              </Card>
+            </div>
+
+            <Card>
+              <div style={{fontSize:8,color:T.muted,fontFamily:T.mono,letterSpacing:"1.5px",marginBottom:16}}>🧠 INTELIGENCIA — PESOS ACTUALES</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16}}>
+                {[["Hook","hooks","#c77dff"],["Estilo","styles","#4cc9f0"],["Paleta","palettes","#f8961e"],["Emoción","emotions","#00f5d4"]].map(([title,dim,color])=>(
+                  <div key={dim}>
+                    <div style={{fontSize:8,color,fontFamily:T.mono,letterSpacing:"1px",marginBottom:8}}>{title}</div>
+                    {topOf(dim).map(([k,v])=>(
+                      <div key={k} style={{marginBottom:7}}>
+                        <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                          <span style={{fontSize:9,color:"#666"}}>{LBL[dim]?.[k]||k}</span>
+                          <span style={{fontSize:8,color,fontFamily:T.mono}}>{Math.round(v)}</span>
+                        </div>
+                        <Bar v={Math.round(v)} color={color} h={3}/>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </Card>
+          </div>
+        )}
+
+        {/* ── BRIEF ── */}
+        {view==="brief"&&(
+          <div style={{animation:"fadeUp .3s ease",maxWidth:660}}>
+            <div style={{marginBottom:22}}>
+              <div style={{fontSize:8,color:brand?.color||"#00f5d4",fontFamily:T.mono,letterSpacing:"2.5px",marginBottom:2}}>BRIEF INTELIGENTE</div>
+              <h1 style={{margin:"0 0 5px",fontSize:20,fontWeight:900,letterSpacing:"-0.6px"}}>Configurar {brand?.name}</h1>
+              <p style={{margin:0,color:"#444",fontSize:12}}>La IA genera automáticamente hooks, copy, dolores y estrategia creativa completa</p>
+            </div>
+            {brand?.brief&&(
+              <div style={{marginBottom:14,padding:"12px 14px",background:"rgba(0,245,212,0.04)",border:"1px solid rgba(0,245,212,0.15)",borderRadius:9}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:10,color:"#00f5d4",fontWeight:700,marginBottom:3}}>✓ Brief activo — {brand.brief.productName}</div>
+                    <div style={{fontSize:10,color:"#444",marginBottom:2}}>{brand.brief.targetAudience}</div>
+                    <div style={{fontSize:10,color:"#555"}}>✨ {brand.brief.mainBenefit}</div>
+                  </div>
+                  <button onClick={()=>{
+                    const bw=brand.weights||defaultWeights();
+                    const sH=[...HOOKS].sort((a,b)=>(bw.hooks[b]||50)-(bw.hooks[a]||50));
+                    const sS=[...STYLES].sort((a,b)=>(bw.styles[b]||50)-(bw.styles[a]||50));
+                    const sP=[...PALETTES].sort((a,b)=>(bw.palettes[b]||50)-(bw.palettes[a]||50));
+                    const cfgs=[
+                      {hook:sH[0],style:sS[0],palette:sP[0],emotion:"aspiracional",cta:"compra_ahora"},
+                      {hook:sH[1]||sH[0],style:sS[1]||sS[0],palette:sP[1]||sP[0],emotion:"miedo_perdida",cta:"oferta_limitada"},
+                      {hook:sH[2]||sH[0],style:sS[2]||sS[0],palette:sP[2]||sP[0],emotion:"confianza",cta:"ver_resultado"},
+                      {hook:sH[3]||sH[1],style:sS[3]||sS[1],palette:sP[0],emotion:"urgencia",cta:"reclama_descuento"},
+                    ];
+                    const tmp={name:brand.name,weights:bw};
+                    const variants=cfgs.map((cfg,i)=>{
+                      const copy=brand.brief.fullAdCopies?.[i]||{};
+                      return {id:`v_${Date.now()}_${i}`,...cfg,
+                        headline:copy.headline||brand.brief.headlines?.[i]||brand.brief.mainBenefit||"",
+                        bodyText:copy.body||brand.brief.bodyTexts?.[i]||"",
+                        predictedScore:scoreV(cfg,bw),
+                        adName:makeAdName(tmp,cfg,i),
+                        imageUrl:null,status:"ready",metrics:null};
+                    }).sort((a,b)=>b.predictedScore-a.predictedScore);
+                    mutBrand(b=>{b.variants=variants;});
+                    setView("variants");
+                  }} style={{padding:"8px 14px",background:`linear-gradient(135deg,${brand?.color||"#00f5d4"},#4cc9f0)`,border:"none",borderRadius:8,color:"#000",fontWeight:800,fontSize:11,cursor:"pointer",whiteSpace:"nowrap",flexShrink:0}}>
+                    ⚡ Usar este Brief →
+                  </button>
+                </div>
+              </div>
+            )}
+            <Card style={{marginBottom:12}}>
+              <div style={{fontSize:8,color:T.muted,fontFamily:T.mono,letterSpacing:"1.5px",marginBottom:12}}>PRODUCTO</div>
+              <div style={{display:"grid",gap:11}}>
+                {[{k:"productName",l:"Nombre del Producto / Servicio",p:"ej: Suplemento Omega-3 Premium"},{k:"productUrl",l:"URL del Producto (opcional)",p:"https://..."}].map(f=>(
+                  <div key={f.k}>
+                    <label style={{fontSize:9,color:"#3a3a4a",display:"block",marginBottom:4,fontFamily:T.mono,letterSpacing:"0.5px"}}>{f.l}</label>
+                    <input value={briefForm[f.k]} onChange={e=>setBriefForm(p=>({...p,[f.k]:e.target.value}))} placeholder={f.p} style={{width:"100%",background:"rgba(255,255,255,0.025)",border:`1px solid ${T.border}`,borderRadius:7,padding:"9px 11px",color:T.text,fontSize:12,outline:"none"}} onFocus={e=>e.target.style.borderColor=(brand?.color||"#00f5d4")+"44"} onBlur={e=>e.target.style.borderColor=T.border}/>
+                  </div>
+                ))}
+                <div>
+                  <label style={{fontSize:9,color:"#3a3a4a",display:"block",marginBottom:6,fontFamily:T.mono,letterSpacing:"0.5px"}}>CATEGORÍA</label>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+                    {["ecommerce","beauty","health","fitness","fashion","tech","food","coaching","saas","local"].map(c=>(
+                      <div key={c} onClick={()=>setBriefForm(p=>({...p,category:c}))} style={{padding:"4px 11px",borderRadius:20,cursor:"pointer",fontSize:10,border:"1px solid",borderColor:briefForm.category===c?(brand?.color||"#00f5d4"):T.border,background:briefForm.category===c?`${brand?.color||"#00f5d4"}10`:"transparent",color:briefForm.category===c?(brand?.color||"#00f5d4"):T.muted}}>{c}</div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </Card>
+            <Card style={{marginBottom:14}}>
+              <div style={{fontSize:8,color:T.muted,fontFamily:T.mono,letterSpacing:"1.5px",marginBottom:6}}>IMÁGENES DEL PRODUCTO (1–4)</div>
+              <div style={{fontSize:10,color:"#333",marginBottom:8}}>UGC, lifestyle, fondo blanco, reviews — la IA elige la mejor para cada ad</div>
+              <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+                {prodPics.map((p,i)=><img key={i} src={p} style={{width:60,height:60,objectFit:"cover",borderRadius:7,border:`1px solid ${T.border}`}} alt=""/>)}
+                {prodPics.length<4&&<div onClick={()=>imgRef.current?.click()} style={{width:60,height:60,borderRadius:7,border:`2px dashed ${T.border}`,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:"#333",fontSize:20}}>+</div>}
+              </div>
+              <input ref={imgRef} type="file" accept="image/*" multiple style={{display:"none"}} onChange={e=>handleProdPics(e.target.files)}/>
+            </Card>
+            {genBusy&&<div style={{marginBottom:10,display:"flex",alignItems:"center",gap:9,padding:"9px 13px",background:"rgba(0,245,212,0.04)",border:"1px solid rgba(0,245,212,0.1)",borderRadius:8}}><Spin size={13}/><span style={{fontSize:11,color:"#00f5d4",fontFamily:T.mono}}>{genMsg}</span></div>}
+            <button onClick={doBrief} disabled={!briefForm.productName.trim()||genBusy} style={{width:"100%",padding:"12px 0",background:briefForm.productName&&!genBusy?`linear-gradient(135deg,${brand?.color||"#00f5d4"},#4cc9f0)`:"rgba(255,255,255,0.03)",border:"none",borderRadius:10,color:briefForm.productName&&!genBusy?"#000":"#333",fontWeight:800,fontSize:13,cursor:briefForm.productName&&!genBusy?"pointer":"not-allowed",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+              {genBusy?<><Spin size={15} color="#000"/> Generando...</>:"⚡ Generar Brief + 4 Variantes"}
+            </button>
+          </div>
+        )}
+
+        {/* ── VARIANTS ── */}
+        {view==="variants"&&(
+          <div style={{animation:"fadeUp .3s ease"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:18}}>
+              <div>
+                <div style={{fontSize:8,color:brand?.color||"#00f5d4",fontFamily:T.mono,letterSpacing:"2.5px",marginBottom:2}}>CREATIVOS</div>
+                <h1 style={{margin:0,fontSize:20,fontWeight:900,letterSpacing:"-0.6px"}}>Variantes Generadas</h1>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={doBrief} disabled={genBusy} style={{padding:"7px 14px",background:"rgba(255,255,255,0.04)",border:`1px solid ${T.border}`,borderRadius:8,color:"#888",cursor:"pointer",fontSize:11,display:"flex",alignItems:"center",gap:5}}>{genBusy?<Spin size={11}/>:null}Regenerar</button>
+                <button onClick={()=>setView("results")} style={{padding:"7px 14px",background:`linear-gradient(135deg,${brand?.color||"#00f5d4"},#4cc9f0)`,border:"none",borderRadius:8,color:"#000",fontWeight:700,cursor:"pointer",fontSize:11}}>📊 Subir Resultados</button>
+              </div>
+            </div>
+            {brand?.brief&&(
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}}>
+                <Tag color="#555">🎯 {brand.brief.targetAudience?.slice(0,55)}...</Tag>
+                <Tag color={brand?.color||"#00f5d4"}>✨ {brand.brief.mainBenefit?.slice(0,45)}...</Tag>
+              </div>
+            )}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:13}}>
+              {(brand?.variants||[]).map((v,i)=>{
+                const sc=v.predictedScore; const c=sc>=75?"#00f5d4":sc>=55?"#f8961e":"#f72585"; const busy=!!imgBusy[v.id];
+                return (
+                  <Card key={v.id} glow={selVar?.id===v.id?brand?.color:undefined} onClick={()=>setSelVar(p=>p?.id===v.id?null:v)} style={{border:`1px solid ${selVar?.id===v.id?(brand?.color||"#00f5d4")+"33":T.border}`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+                      <div>
+                        <div style={{fontSize:8,color:"#252530",fontFamily:T.mono,marginBottom:2}}>{v.adName}</div>
+                        <div style={{fontSize:22,fontWeight:900,color:c,fontFamily:T.mono,lineHeight:1}}>{sc}<span style={{fontSize:10,color:"#252530",fontWeight:400}}>/100</span></div>
+                      </div>
+                      <div style={{display:"flex",gap:4}}>{i===0&&<Tag color="#f8961e">🏆</Tag>}<Tag color={c} xs>{sc>=75?"HIGH":sc>=55?"MED":"LOW"}</Tag></div>
+                    </div>
+                    <Bar v={sc} color={c} h={2}/>
+                    <div style={{display:"flex",flexWrap:"wrap",gap:4,margin:"9px 0"}}>
+                      <Tag color="#c77dff" xs>{LBL.hooks[v.hook]}</Tag>
+                      <Tag color="#4cc9f0" xs>{LBL.styles[v.style]}</Tag>
+                      <Tag color="#f8961e" xs>{LBL.palettes[v.palette]}</Tag>
+                    </div>
+                    <div style={{background:"rgba(255,255,255,0.02)",borderRadius:7,padding:"7px 9px",marginBottom:9}}>
+                      <div style={{fontSize:8,color:"#252530",fontFamily:T.mono,marginBottom:2}}>HEADLINE</div>
+                      <div style={{fontSize:11,fontWeight:700,color:"#d0d0e8",lineHeight:1.4}}>"{v.headline}"</div>
+                      {v.bodyText&&<div style={{fontSize:9,color:"#444",marginTop:3,lineHeight:1.5}}>"{v.bodyText}"</div>}
+                    </div>
+                    {v.imageUrl?(
+                      <div style={{marginBottom:9,position:"relative"}}>
+                        <img src={v.imageUrl} style={{width:"100%",aspectRatio:"1",objectFit:"cover",borderRadius:7}} alt="ad"/>
+                        <div style={{position:"absolute",top:6,right:6,display:"flex",gap:5}}>
+                          <button onClick={e=>{e.stopPropagation();downloadPNG(v.imageUrl,v.adName);}} style={{padding:"4px 8px",background:"rgba(0,0,0,0.7)",border:"none",borderRadius:5,color:"#fff",fontSize:9,cursor:"pointer"}}>↓ PNG</button>
+                          <button onClick={e=>{e.stopPropagation();const gi=imgs.find(x=>x.variantId===v.id);if(gi)setLightbox(gi);}} style={{padding:"4px 8px",background:"rgba(0,0,0,0.7)",border:"none",borderRadius:5,color:"#fff",fontSize:9,cursor:"pointer"}}>⛶</button>
+                        </div>
+                      </div>
+                    ):(
+                      <div style={{aspectRatio:"1",background:"rgba(255,255,255,0.015)",borderRadius:7,display:"flex",alignItems:"center",justifyContent:"center",marginBottom:9,border:`1px dashed ${T.faint}`,flexDirection:"column",gap:5}}>
+                        {busy?<><Spin size={18} color={brand?.color||"#00f5d4"}/><span style={{fontSize:9,color:"#252530"}}>generando...</span></>:imgError[v.id]?<><span style={{fontSize:14}}>⚠️</span><span style={{fontSize:8,color:"#f72585",textAlign:"center",padding:"0 8px",lineHeight:1.4}}>{imgError[v.id].includes("CORS_BLOCKED")?"Sandbox bloquea OpenAI — usa el botón 📋 para copiar el prompt y generar en ChatGPT":imgError[v.id].slice(0,120)}</span></>:<><span style={{fontSize:20}}>🖼</span><span style={{fontSize:9,color:"#252530"}}>sin imagen</span></>}
+                      </div>
+                    )}
+                    <div style={{display:"flex",gap:6}} onClick={e=>e.stopPropagation()}>
+                      <button onClick={()=>doImage(v)} disabled={busy||!meta?.apiKey} style={{flex:1,padding:"7px 0",background:busy||!meta?.apiKey?"rgba(255,255,255,0.03)":`linear-gradient(135deg,${brand?.color||"#00f5d4"},#4cc9f0)`,border:busy||!meta?.apiKey?`1px solid ${T.border}`:"none",borderRadius:7,color:busy||!meta?.apiKey?"#333":"#000",fontWeight:700,cursor:busy||!meta?.apiKey?"not-allowed":"pointer",fontSize:10,display:"flex",alignItems:"center",justifyContent:"center",gap:4}}>
+                        {busy?<><Spin size={10} color="#000"/>gen...</>:"⚡ Generar Imagen"}
+                      </button>
+                      <button onClick={()=>navigator.clipboard?.writeText(buildPrompt(brand?.brief||{},v,""))} style={{padding:"7px 10px",background:"rgba(255,255,255,0.03)",border:`1px solid ${T.border}`,borderRadius:7,color:"#555",cursor:"pointer",fontSize:10}} title="Copiar prompt">📋</button>
+                    </div>
+                  </Card>
+                );
+              })}
+            </div>
+            {selVar&&(
+              <Card style={{marginTop:14,animation:"fadeUp .2s ease"}} glow={brand?.color}>
+                <div style={{fontSize:8,color:brand?.color||"#00f5d4",fontFamily:T.mono,letterSpacing:"1.5px",marginBottom:10}}>PROMPT — {selVar.adName}</div>
+                <pre style={{fontFamily:T.mono,fontSize:9,color:"#444",lineHeight:1.9,whiteSpace:"pre-wrap",margin:0}}>{buildPrompt(brand?.brief||{},selVar,"")}</pre>
+              </Card>
+            )}
+          </div>
+        )}
+
+        {/* ── GALLERY ── */}
+        {view==="gallery"&&(
+          <div style={{animation:"fadeUp .3s ease"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:18}}>
+              <div>
+                <div style={{fontSize:8,color:brand?.color||"#00f5d4",fontFamily:T.mono,letterSpacing:"2.5px",marginBottom:2}}>CREATIVE LIBRARY</div>
+                <h1 style={{margin:0,fontSize:20,fontWeight:900,letterSpacing:"-0.6px"}}>Galería de Ads <span style={{fontSize:14,color:T.muted,fontWeight:400}}>({filteredImgs.length})</span></h1>
+              </div>
+              {filteredImgs.filter(i=>i.imageUrl).length>0&&(
+                <button onClick={()=>downloadZIP(filteredImgs.filter(i=>i.imageUrl&&(galBrand==="all"||i.brandId===galBrand)))} style={{padding:"7px 16px",background:"rgba(255,255,255,0.05)",border:`1px solid ${T.border}`,borderRadius:8,color:"#888",cursor:"pointer",fontSize:11}}>↓ ZIP Ronda</button>
+              )}
+            </div>
+
+            {/* Filters */}
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:18,padding:"12px 14px",background:"rgba(255,255,255,0.02)",borderRadius:10,border:`1px solid ${T.border}`}}>
+              <div style={{display:"flex",gap:5,alignItems:"center"}}>
+                <span style={{fontSize:8,color:T.muted,fontFamily:T.mono,letterSpacing:"1px",whiteSpace:"nowrap"}}>MARCA</span>
+                {[{id:"all",label:"Todas"},...(meta?.brands||[]).map(b=>({id:b.id,label:b.name,color:b.color}))].map(opt=>(
+                  <Tag key={opt.id} color={galBrand===opt.id?(opt.color||brand?.color||"#00f5d4"):"#444"} onClick={()=>setGalBrand(opt.id)}>{opt.label}</Tag>
+                ))}
+              </div>
+              <div style={{width:1,background:T.border}}/>
+              <div style={{display:"flex",gap:5,alignItems:"center"}}>
+                <span style={{fontSize:8,color:T.muted,fontFamily:T.mono,letterSpacing:"1px",whiteSpace:"nowrap"}}>RONDA</span>
+                {[{id:"all",label:"Todas"},...allRounds.map(r=>({id:String(r),label:`R${r}`}))].map(opt=>(
+                  <Tag key={opt.id} color={galRound===opt.id?(brand?.color||"#00f5d4"):"#444"} onClick={()=>setGalRound(opt.id)}>{opt.label}</Tag>
+                ))}
+              </div>
+              <div style={{width:1,background:T.border}}/>
+              <div style={{display:"flex",gap:5,alignItems:"center"}}>
+                <span style={{fontSize:8,color:T.muted,fontFamily:T.mono,letterSpacing:"1px",whiteSpace:"nowrap"}}>ESTADO</span>
+                {[["all","Todas","#555"],["winner","Ganadoras","#00f5d4"],["tested","Testeadas","#4cc9f0"],["generated","Generadas","#c77dff"]].map(([id,label,color])=>(
+                  <Tag key={id} color={galFilter===id?color:"#444"} onClick={()=>setGalFilter(id)}>{label}</Tag>
+                ))}
+              </div>
+            </div>
+
+            {/* Stats row */}
+            {filteredImgs.length>0&&(()=>{
+              const withMetrics=filteredImgs.filter(i=>i.metrics?.cpa);
+              const avgCpa=withMetrics.length?withMetrics.reduce((s,i)=>s+i.metrics.cpa,0)/withMetrics.length:null;
+              const bestCpa=withMetrics.length?Math.min(...withMetrics.map(i=>i.metrics.cpa)):null;
+              const winners=filteredImgs.filter(i=>i.status==="winner");
+              return (
+                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:16}}>
+                  <Kpi icon="▣" label="TOTAL ADS" val={filteredImgs.length} color={brand?.color||"#00f5d4"} sub="en galería"/>
+                  <Kpi icon="🏆" label="GANADORAS" val={winners.length} color="#f8961e" sub="ads ganadores"/>
+                  <Kpi icon="◈" label="MEJOR CPA" val={bestCpa?`$${bestCpa.toFixed(2)}`:"—"} color="#00f5d4" sub="en selección"/>
+                  <Kpi icon="◈" label="CPA PROM"  val={avgCpa?`$${avgCpa.toFixed(2)}`:"—"} color="#4cc9f0" sub="en selección"/>
+                </div>
+              );
+            })()}
+
+            {filteredImgs.length===0?(
+              <div style={{textAlign:"center",padding:60,color:T.muted}}>
+                <div style={{fontSize:40,marginBottom:12}}>▣</div>
+                <div style={{fontSize:14,fontWeight:700,marginBottom:4}}>Sin imágenes aún</div>
+                <div style={{fontSize:12,color:"#333"}}>Genera ads desde "Variantes" para poblar la galería</div>
+              </div>
+            ):(
+              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
+                {filteredImgs.map(entry=>{
+                  const isWinner=entry.status==="winner";
+                  const bColor=meta?.brands?.find(b=>b.id===entry.brandId)?.color||"#00f5d4";
+                  return (
+                    <div key={entry.id} style={{background:T.card,border:`1px solid ${isWinner?"#00f5d433":T.border}`,borderRadius:12,overflow:"hidden",boxShadow:isWinner?"0 0 20px #00f5d410":undefined}}>
+                      {/* Image */}
+                      <div style={{position:"relative",aspectRatio:"1",background:"#0a0a14",cursor:"pointer"}} onClick={()=>setLightbox(entry)}>
+                        {entry.imageUrl?(
+                          <img src={entry.imageUrl} style={{width:"100%",height:"100%",objectFit:"cover"}} alt={entry.adName}/>
+                        ):(
+                          <div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:"#1a1a24",fontSize:28}}>🖼</div>
+                        )}
+                        {/* Overlay badges */}
+                        <div style={{position:"absolute",top:7,left:7,display:"flex",gap:4,flexWrap:"wrap"}}>
+                          {isWinner&&<span style={{padding:"2px 8px",background:"rgba(0,245,212,0.9)",borderRadius:10,fontSize:9,fontWeight:800,color:"#000"}}>🏆 WINNER</span>}
+                          {entry.status==="testing"&&<span style={{padding:"2px 8px",background:"rgba(248,150,30,0.9)",borderRadius:10,fontSize:9,fontWeight:800,color:"#000"}}>⚡ TESTING</span>}
+                        </div>
+                        <div style={{position:"absolute",top:7,right:7}}>
+                          <span style={{padding:"2px 7px",background:"rgba(0,0,0,0.75)",borderRadius:8,fontSize:8,color:"#ccc",fontFamily:T.mono}}>R{entry.round}</span>
+                        </div>
+                        {/* Download hover */}
+                        {entry.imageUrl&&(
+                          <div style={{position:"absolute",bottom:7,right:7,display:"flex",gap:4}} onClick={e=>e.stopPropagation()}>
+                            <button onClick={()=>downloadPNG(entry.imageUrl,entry.adName)} style={{padding:"3px 8px",background:"rgba(0,0,0,0.8)",border:"none",borderRadius:5,color:"#ccc",fontSize:8,cursor:"pointer"}}>↓ PNG</button>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Info */}
+                      <div style={{padding:"10px 12px"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+                          <div style={{fontSize:9,color:"#555",fontFamily:T.mono}}>{entry.adName}</div>
+                          <div style={{fontSize:9,color:bColor,fontFamily:T.mono}}>{entry.brandName}</div>
+                        </div>
+                        <div style={{fontSize:11,fontWeight:700,color:"#c8c8d8",lineHeight:1.3,marginBottom:5}}>"{entry.headline}"</div>
+                        <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:7}}>
+                          <Tag color="#c77dff" xs>{LBL.hooks[entry.hook]||entry.hook}</Tag>
+                          <Tag color="#4cc9f0" xs>{LBL.styles[entry.style]||entry.style}</Tag>
+                        </div>
+
+                        {/* Metrics */}
+                        {entry.metrics?(
+                          <div style={{background:"rgba(255,255,255,0.02)",borderRadius:7,padding:"7px 9px",marginBottom:6}}>
+                            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4}}>
+                              {[["CPA",entry.metrics.cpa!=null?`$${entry.metrics.cpa.toFixed(2)}`:null,"#00f5d4"],
+                                ["CTR",entry.metrics.ctr!=null?`${entry.metrics.ctr}%`:null,"#4cc9f0"],
+                                ["ROAS",entry.metrics.roas!=null?`${entry.metrics.roas}x`:null,"#f8961e"],
+                                ["COMPRAS",entry.metrics.purchases,"#c77dff"]
+                              ].map(([lbl,val,col])=>val!=null&&(
+                                <div key={lbl}>
+                                  <div style={{fontSize:7,color:T.muted,fontFamily:T.mono,letterSpacing:"0.5px"}}>{lbl}</div>
+                                  <div style={{fontSize:12,fontWeight:800,color:col,fontFamily:T.mono}}>{val}</div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ):(
+                          <div style={{fontSize:9,color:"#252530",fontFamily:T.mono,marginBottom:6}}>Sin métricas aún</div>
+                        )}
+
+                        {/* Score + format */}
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                          <div style={{display:"flex",alignItems:"center",gap:6}}>
+                            <span style={{fontSize:8,color:T.muted,fontFamily:T.mono}}>SCORE</span>
+                            <span style={{fontSize:12,fontWeight:900,color:entry.predictedScore>=75?"#00f5d4":entry.predictedScore>=55?"#f8961e":"#f72585",fontFamily:T.mono}}>{entry.predictedScore}</span>
+                          </div>
+                          <span style={{fontSize:8,color:"#252530",fontFamily:T.mono}}>{entry.format}</span>
+                        </div>
+
+                        {/* Status toggle */}
+                        <div style={{display:"flex",gap:5,marginTop:8}}>
+                          {["generated","testing","winner","paused"].map(st=>(
+                            <div key={st} onClick={()=>setImgs(p=>p.map(x=>x.id===entry.id?{...x,status:st}:x))} style={{flex:1,padding:"3px 0",textAlign:"center",borderRadius:5,cursor:"pointer",fontSize:8,fontWeight:600,background:entry.status===st?"rgba(255,255,255,0.08)":"transparent",border:`1px solid ${entry.status===st?"rgba(255,255,255,0.12)":T.faint}`,color:entry.status===st?"#ccc":"#333"}}>
+                              {{generated:"Gen",testing:"Test",winner:"Win",paused:"Pau"}[st]}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── RESULTS ── */}
+        {view==="results"&&(
+          <div style={{animation:"fadeUp .3s ease",maxWidth:780}}>
+            <div style={{marginBottom:22}}>
+              <div style={{fontSize:8,color:brand?.color||"#00f5d4",fontFamily:T.mono,letterSpacing:"2.5px",marginBottom:2}}>ANÁLISIS</div>
+              <h1 style={{margin:"0 0 4px",fontSize:20,fontWeight:900,letterSpacing:"-0.6px"}}>Subir Screenshot de Meta</h1>
+              <p style={{margin:0,color:"#444",fontSize:11}}>La IA lee las métricas y las mapea automáticamente a cada ad por su nombre estructurado</p>
+            </div>
+            {!shotSrc?(
+              <div onClick={()=>shotRef.current?.click()} style={{border:`2px dashed ${T.border}`,borderRadius:12,padding:40,textAlign:"center",cursor:"pointer",background:"rgba(255,255,255,0.01)",transition:"border-color .2s"}} onMouseOver={e=>e.currentTarget.style.borderColor=(brand?.color||"#00f5d4")+"44"} onMouseOut={e=>e.currentTarget.style.borderColor=T.border}>
+                <div style={{fontSize:32,marginBottom:8}}>📊</div>
+                <div style={{fontSize:13,fontWeight:700,color:"#444",marginBottom:3}}>Sube tu screenshot de Meta Ads Manager</div>
+                <div style={{fontSize:11,color:"#2a2a35"}}>Los ads se identifican por naming: MARC-R01-01-PP-UG</div>
+                <input ref={shotRef} type="file" accept="image/*" style={{display:"none"}} onChange={e=>e.target.files?.[0]&&doShot(e.target.files[0])}/>
+              </div>
+            ):(
+              <div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:12}}>
+                  <div>
+                    <div style={{fontSize:8,color:T.muted,fontFamily:T.mono,marginBottom:6}}>SCREENSHOT</div>
+                    <img src={shotSrc} style={{width:"100%",borderRadius:9,border:`1px solid ${T.border}`}} alt="ss"/>
+                  </div>
+                  <div>
+                    <div style={{fontSize:8,color:T.muted,fontFamily:T.mono,marginBottom:6,display:"flex",alignItems:"center",gap:7}}>MÉTRICAS DETECTADAS {shotBusy&&<Spin size={10}/>}</div>
+                    {shotBusy?(<div style={{display:"flex",alignItems:"center",gap:9,padding:18,color:T.muted}}><Spin size={16} color={brand?.color||"#00f5d4"}/><span style={{fontSize:11}}>Analizando...</span></div>
+                    ):shotMets.length>0?(
+                      <div>
+                        {shotMets.map((m,i)=>(
+                          <div key={i} style={{padding:"8px 11px",background:"rgba(255,255,255,0.02)",borderRadius:8,marginBottom:6,border:`1px solid ${m.matched?"rgba(0,245,212,0.1)":T.faint}`}}>
+                            <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                              <span style={{fontSize:9,fontFamily:T.mono,color:m.matched?"#00f5d4":"#333"}}>{m.adName}</span>
+                              <span style={{fontSize:7,color:m.matched?"#00f5d4":"#f72585",fontFamily:T.mono}}>{m.matched?"✓ MATCH":"NO MATCH"}</span>
+                            </div>
+                            <div style={{display:"flex",gap:9,flexWrap:"wrap"}}>
+                              {m.cpa!=null&&<span style={{fontSize:11,color:"#fff"}}>CPA <strong style={{color:"#00f5d4"}}>${m.cpa}</strong></span>}
+                              {m.ctr!=null&&<span style={{fontSize:10,color:"#888"}}>CTR {m.ctr}%</span>}
+                              {m.roas!=null&&<span style={{fontSize:10,color:"#888"}}>ROAS {m.roas}x</span>}
+                              {m.purchases!=null&&<span style={{fontSize:10,color:"#888"}}>{m.purchases} compras</span>}
+                            </div>
+                          </div>
+                        ))}
+                        <button onClick={applyLearning} style={{width:"100%",marginTop:8,padding:"10px 0",background:`linear-gradient(135deg,${brand?.color||"#00f5d4"},#4cc9f0)`,border:"none",borderRadius:8,color:"#000",fontWeight:800,cursor:"pointer",fontSize:12}}>🧠 Aplicar Aprendizaje + Ver Galería →</button>
+                      </div>
+                    ):<div style={{color:"#1a1a24",fontSize:10,fontFamily:T.mono}}>No se detectaron métricas</div>}
+                  </div>
+                </div>
+                <button onClick={()=>{setShotSrc(null);setShotMets([]);}} style={{padding:"6px 12px",background:"rgba(255,255,255,0.03)",border:`1px solid ${T.border}`,borderRadius:6,color:"#555",cursor:"pointer",fontSize:10}}>← Subir otro</button>
+              </div>
+            )}
+            {brand?.adLog?.length>0&&(
+              <div style={{marginTop:24}}>
+                <div style={{fontSize:8,color:T.muted,fontFamily:T.mono,letterSpacing:"1.5px",marginBottom:10}}>HISTORIAL</div>
+                <div style={{overflowX:"auto"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:10}}>
+                    <thead><tr style={{borderBottom:`1px solid ${T.faint}`}}>{["Ad","Hook","Estilo","CPA","CTR","ROAS","Compras"].map(h=><th key={h} style={{textAlign:"left",padding:"0 9px 7px 0",fontFamily:T.mono,fontSize:7,color:"#2a2a35",fontWeight:600,letterSpacing:"0.5px"}}>{h}</th>)}</tr></thead>
+                    <tbody>{brand.adLog.slice(0,10).map((l,i)=>(
+                      <tr key={i} style={{borderBottom:`1px solid ${T.faint}`}}>
+                        <td style={{padding:"6px 9px 6px 0",fontFamily:T.mono,color:"#555",fontSize:9}}>{l.adName}</td>
+                        <td style={{padding:"6px 9px 6px 0"}}><Tag color="#c77dff" xs>{LBL.hooks[l.hook]||l.hook}</Tag></td>
+                        <td style={{padding:"6px 9px 6px 0"}}><Tag color="#4cc9f0" xs>{LBL.styles[l.style]||l.style}</Tag></td>
+                        <td style={{padding:"6px 9px 6px 0",fontFamily:T.mono,color:"#00f5d4",fontWeight:700}}>{l.cpa!=null?`$${parseFloat(l.cpa).toFixed(2)}`:"—"}</td>
+                        <td style={{padding:"6px 9px 6px 0",color:"#555"}}>{l.ctr!=null?`${l.ctr}%`:"—"}</td>
+                        <td style={{padding:"6px 9px 6px 0",color:"#555"}}>{l.roas!=null?`${l.roas}x`:"—"}</td>
+                        <td style={{padding:"6px 0",color:"#555"}}>{l.purchases||"—"}</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── SETTINGS ── */}
+        {view==="settings"&&(
+          <div style={{animation:"fadeUp .3s ease",maxWidth:560}}>
+            <div style={{marginBottom:22}}>
+              <div style={{fontSize:8,color:"#00f5d4",fontFamily:T.mono,letterSpacing:"2.5px",marginBottom:2}}>SISTEMA</div>
+              <h1 style={{margin:0,fontSize:20,fontWeight:900,letterSpacing:"-0.6px"}}>Ajustes</h1>
+            </div>
+            <Card style={{marginBottom:12}}>
+              <div style={{fontSize:11,fontWeight:700,marginBottom:10,color:"#ccc"}}>🔑 OpenAI API Key</div>
+              <div style={{fontSize:10,color:"#444",marginBottom:8}}>Requerida para GPT Image 2.0. Guardada localmente en tu navegador.</div>
+              <div style={{display:"flex",gap:7}}>
+                <input type={showKey?"text":"password"} value={showKey?(apiDraft||meta?.apiKey||""):(meta?.apiKey?"••••••••••••••••••":"")} onChange={e=>setApiDraft(e.target.value)} onFocus={()=>{setShowKey(true);setApiDraft(meta?.apiKey||"");}} placeholder="sk-proj-..." style={{flex:1,background:"rgba(255,255,255,0.025)",border:`1px solid ${T.border}`,borderRadius:7,padding:"8px 11px",color:T.text,fontSize:11,outline:"none",fontFamily:T.mono}}/>
+                <button onClick={()=>setShowKey(p=>!p)} style={{padding:"8px 10px",background:"rgba(255,255,255,0.04)",border:`1px solid ${T.border}`,borderRadius:7,color:"#666",cursor:"pointer",fontSize:10}}>{showKey?"🙈":"👁"}</button>
+                <button onClick={()=>{if(apiDraft.trim()){mutMeta(a=>a.apiKey=apiDraft.trim());setShowKey(false);setApiDraft("");}}} style={{padding:"8px 14px",background:"linear-gradient(135deg,#00f5d4,#4cc9f0)",border:"none",borderRadius:7,color:"#000",fontWeight:700,cursor:"pointer",fontSize:11}}>Guardar</button>
+              </div>
+              {meta?.apiKey&&<div style={{marginTop:6,fontSize:9,color:"#00f5d444",fontFamily:T.mono}}>✓ API KEY ACTIVA</div>}
+            </Card>
+            <Card style={{marginBottom:12}}>
+              <div style={{fontSize:11,fontWeight:700,marginBottom:10,color:"#ccc"}}>🏢 Gestión de Marcas</div>
+              {meta?.brands?.map(b=>(
+                <BrandRow key={b.id} brand={b}
+                  onRename={name=>mutMeta(a=>{const br=a.brands.find(x=>x.id===b.id);if(br)br.name=name;})}
+                  onRecolor={color=>mutMeta(a=>{const br=a.brands.find(x=>x.id===b.id);if(br)br.color=color;})}
+                  onReset={()=>window.confirm(`¿Resetear aprendizaje de ${b.name}?`)&&mutMeta(a=>{const br=a.brands.find(x=>x.id===b.id);if(br){br.weights=defaultWeights();br.variants=[];br.adLog=[];br.brief=null;}})}
+                  onDelete={()=>meta.brands.length>1&&window.confirm(`¿Eliminar ${b.name}?`)&&mutMeta(a=>{a.brands=a.brands.filter(x=>x.id!==b.id);if(a.activeBrandId===b.id)a.activeBrandId=a.brands[0]?.id;})}
+                />
+              ))}
+            </Card>
+            <Card>
+              <div style={{fontSize:11,fontWeight:700,marginBottom:8,color:"#ccc"}}>📋 Naming + Formatos</div>
+              <div style={{fontFamily:T.mono,fontSize:10,color:"#444",lineHeight:2.2}}>
+                <span style={{color:"#00f5d4"}}>MARC-R01-01-PP-UG</span><br/>
+                <span style={{color:"#2a2a35"}}>MARC=marca · R01=ronda · PP=hook · UG=estilo</span><br/>
+                <span style={{color:"#2a2a35"}}>Formato imagen: PNG 1024×1024px (1:1 square)</span><br/>
+                <span style={{color:"#2a2a35"}}>Descarga: individual PNG o ZIP por ronda</span>
+              </div>
+            </Card>
+          </div>
+        )}
+      </main>
+
+      {/* ═══════════════ LIGHTBOX ═══════════════ */}
+      {lightbox&&(
+        <div onClick={()=>setLightbox(null)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.92)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:"#0a0a14",borderRadius:16,overflow:"hidden",maxWidth:780,width:"100%",border:`1px solid ${T.border}`,display:"grid",gridTemplateColumns:"1fr 1fr",gap:0}}>
+            {/* Image */}
+            <div style={{position:"relative",aspectRatio:"1",background:"#000"}}>
+              {lightbox.imageUrl&&<img src={lightbox.imageUrl} style={{width:"100%",height:"100%",objectFit:"cover"}} alt="ad"/>}
+              {lightbox.status==="winner"&&<div style={{position:"absolute",top:12,left:12,padding:"4px 12px",background:"rgba(0,245,212,0.9)",borderRadius:12,fontSize:10,fontWeight:800,color:"#000"}}>🏆 WINNER</div>}
+            </div>
+            {/* Details */}
+            <div style={{padding:20,overflowY:"auto",maxHeight:500}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:14}}>
+                <div style={{fontSize:9,color:T.muted,fontFamily:T.mono}}>{lightbox.adName}</div>
+                <button onClick={()=>setLightbox(null)} style={{background:"none",border:"none",color:"#555",cursor:"pointer",fontSize:16,padding:0,lineHeight:1}}>×</button>
+              </div>
+              <div style={{fontSize:13,fontWeight:800,color:"#d8d8e8",marginBottom:6,lineHeight:1.4}}>"{lightbox.headline}"</div>
+              {lightbox.bodyText&&<div style={{fontSize:11,color:"#555",marginBottom:12,lineHeight:1.5}}>"{lightbox.bodyText}"</div>}
+              <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:14}}>
+                <Tag color="#c77dff" xs>{LBL.hooks[lightbox.hook]||lightbox.hook}</Tag>
+                <Tag color="#4cc9f0" xs>{LBL.styles[lightbox.style]||lightbox.style}</Tag>
+                <Tag color="#f8961e" xs>{LBL.palettes[lightbox.palette]||lightbox.palette}</Tag>
+                <Tag color="#b5e48c" xs>{LBL.emotions[lightbox.emotion]||lightbox.emotion}</Tag>
+              </div>
+              {lightbox.metrics&&(
+                <div style={{background:"rgba(0,245,212,0.04)",border:"1px solid rgba(0,245,212,0.1)",borderRadius:10,padding:"12px 14px",marginBottom:14}}>
+                  <div style={{fontSize:8,color:"#00f5d4",fontFamily:T.mono,letterSpacing:"1px",marginBottom:10}}>MÉTRICAS REALES</div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                    {[["CPA",lightbox.metrics.cpa!=null?`$${lightbox.metrics.cpa.toFixed(2)}`:null,"#00f5d4"],
+                      ["CTR",lightbox.metrics.ctr!=null?`${lightbox.metrics.ctr}%`:null,"#4cc9f0"],
+                      ["ROAS",lightbox.metrics.roas!=null?`${lightbox.metrics.roas}x`:null,"#f8961e"],
+                      ["COMPRAS",lightbox.metrics.purchases,"#c77dff"],
+                      ["SPEND",lightbox.metrics.spend!=null?`$${lightbox.metrics.spend}`:null,"#b5e48c"],
+                      ["IMPRESSIONS",lightbox.metrics.impressions?.toLocaleString(),"#888"]
+                    ].map(([lbl,val,col])=>val!=null&&(
+                      <div key={lbl}>
+                        <div style={{fontSize:7,color:T.muted,fontFamily:T.mono,marginBottom:2,letterSpacing:"0.5px"}}>{lbl}</div>
+                        <div style={{fontSize:16,fontWeight:900,color:col,fontFamily:T.mono}}>{val}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div style={{display:"flex",gap:7,marginBottom:12}}>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:8,color:T.muted,fontFamily:T.mono,marginBottom:3}}>PRED. SCORE</div>
+                  <div style={{fontSize:18,fontWeight:900,color:lightbox.predictedScore>=75?"#00f5d4":lightbox.predictedScore>=55?"#f8961e":"#f72585",fontFamily:T.mono}}>{lightbox.predictedScore}</div>
+                  <Bar v={lightbox.predictedScore} h={3}/>
+                </div>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:8,color:T.muted,fontFamily:T.mono,marginBottom:3}}>FORMATO</div>
+                  <div style={{fontSize:11,color:"#777",fontFamily:T.mono}}>{lightbox.format}</div>
+                </div>
+              </div>
+              {/* Status */}
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:8,color:T.muted,fontFamily:T.mono,marginBottom:6}}>ESTADO</div>
+                <div style={{display:"flex",gap:5}}>
+                  {["generated","testing","winner","paused"].map(st=>(
+                    <div key={st} onClick={()=>{setImgs(p=>p.map(x=>x.id===lightbox.id?{...x,status:st}:x));setLightbox(p=>({...p,status:st}));}} style={{flex:1,padding:"4px 0",textAlign:"center",borderRadius:6,cursor:"pointer",fontSize:9,fontWeight:600,background:lightbox.status===st?"rgba(255,255,255,0.1)":"transparent",border:`1px solid ${lightbox.status===st?"rgba(255,255,255,0.15)":T.faint}`,color:lightbox.status===st?"#ccc":"#333"}}>
+                      {{generated:"Generado",testing:"Testing",winner:"Winner",paused:"Pausado"}[st]}
+                    </div>
+                  ))}
+                </div>
+              </div>
+              {lightbox.imageUrl&&(
+                <button onClick={()=>downloadPNG(lightbox.imageUrl,lightbox.adName)} style={{width:"100%",padding:"9px 0",background:`linear-gradient(135deg,${meta?.brands?.find(b=>b.id===lightbox.brandId)?.color||"#00f5d4"},#4cc9f0)`,border:"none",borderRadius:8,color:"#000",fontWeight:800,fontSize:12,cursor:"pointer"}}>
+                  ↓ Descargar PNG (1024×1024)
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── BRAND ROW ────────────────────────────────────────────────────────────────
+function BrandRow({brand,onRename,onRecolor,onReset,onDelete}){
+  const [editing,setEditing]=useState(false);
+  const [draft,setDraft]=useState(brand.name);
+  const inputRef=useRef();
+  const colors=["#00f5d4","#f72585","#4cc9f0","#f8961e","#b5e48c","#c77dff","#ff9f1c","#2ec4b6","#e63946","#7209b7"];
+  const commit=()=>{ if(draft.trim())onRename(draft.trim()); else setDraft(brand.name); setEditing(false); };
+  useEffect(()=>{ if(editing)inputRef.current?.focus(); },[editing]);
+  return (
+    <div style={{padding:"9px 0",borderBottom:`1px solid ${T.faint}`}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:7}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,flex:1}}>
+          <div style={{width:10,height:10,borderRadius:"50%",background:brand.color,cursor:"pointer",boxShadow:`0 0 6px ${brand.color}55`,flexShrink:0}} onClick={()=>{const idx=colors.indexOf(brand.color);onRecolor(colors[(idx+1)%colors.length]);}} title="Click para cambiar"/>
+          {editing?(
+            <input ref={inputRef} value={draft} onChange={e=>setDraft(e.target.value)} onBlur={commit} onKeyDown={e=>{if(e.key==="Enter")commit();if(e.key==="Escape"){setDraft(brand.name);setEditing(false);}}} style={{flex:1,background:"rgba(255,255,255,0.05)",border:`1px solid ${brand.color}44`,borderRadius:5,padding:"2px 7px",color:"#fff",fontSize:12,fontWeight:700,outline:"none"}}/>
+          ):(
+            <span onClick={()=>{setDraft(brand.name);setEditing(true);}} style={{fontSize:12,color:"#ccc",fontWeight:600,cursor:"text",flex:1}}>{brand.name}</span>
+          )}
+          <span style={{fontSize:8,color:"#252530",fontFamily:"'IBM Plex Mono',monospace",flexShrink:0}}>{brand.weights.totalAds}ads·{brand.weights.totalRounds}r</span>
+        </div>
+        <div style={{display:"flex",gap:5,flexShrink:0}}>
+          <button onClick={()=>{setDraft(brand.name);setEditing(true);}} style={{padding:"2px 8px",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:5,color:"#777",cursor:"pointer",fontSize:9}}>✏️</button>
+          <button onClick={onReset} style={{padding:"2px 8px",background:"rgba(248,150,30,0.07)",border:"1px solid rgba(248,150,30,0.15)",borderRadius:5,color:"#f8961e",cursor:"pointer",fontSize:9}}>Reset</button>
+          <button onClick={onDelete} style={{padding:"2px 8px",background:"rgba(247,37,133,0.07)",border:"1px solid rgba(247,37,133,0.13)",borderRadius:5,color:"#f72585",cursor:"pointer",fontSize:9}}>🗑</button>
+        </div>
+      </div>
+      <div style={{display:"flex",gap:4,marginTop:7,marginLeft:18}}>
+        {colors.map(c=><div key={c} onClick={()=>onRecolor(c)} style={{width:12,height:12,borderRadius:"50%",background:c,cursor:"pointer",border:`2px solid ${brand.color===c?"#fff":"transparent"}`,transition:"border .12s"}}/>)}
+      </div>
+    </div>
+  );
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(AdScaleOS));
+  </script>
+</body>
+</html>
